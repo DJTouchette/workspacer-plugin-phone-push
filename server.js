@@ -68,10 +68,117 @@ function connect() {
 }
 
 // ── Your plugin logic ─────────────────────────────────────────────────────────
+// Push "needs-you" moments to your phone. On agent.state_changed with a mode in
+// {approval, question, stopped} we compose a short title/body and send it via the
+// configured provider (ntfy / pushover / webhook), while also mirroring to the
+// desktop `notifications.post` capability. Dedup keeps a flapping state quiet.
+
+// mode → human phrase for the notification body.
+const MODE_PHRASE = {
+  approval: 'needs approval',
+  question: 'asked a question',
+  stopped: 'finished / stopped',
+};
+
+// Dedup: remember the last mode we pushed per session so a state that flaps
+// (e.g. approval → responding → approval) doesn't spam the phone. We only push
+// when (sessionId, mode) differs from what we last sent for that session.
+const lastMode = new Map(); // sessionId -> mode
+
+function basename(p) {
+  if (!p || typeof p !== 'string') return '';
+  const parts = p.replace(/[/\\]+$/, '').split(/[/\\]/);
+  return parts[parts.length - 1] || p;
+}
+
+// A friendly label for the agent: prefer an explicit label if the event ever
+// carries one, else the cwd basename, else a short sessionId.
+function agentLabel(data) {
+  const label = data.label || data.name || data.agentLabel;
+  if (label && typeof label === 'string') return label;
+  const base = basename(data.cwd);
+  if (base) return base;
+  const sid = data.sessionId || '';
+  return sid ? sid.slice(0, 8) : 'agent';
+}
+
+async function sendNtfy(target, title, body) {
+  const res = await fetch('https://ntfy.sh/' + encodeURIComponent(target), {
+    method: 'POST',
+    headers: { 'Title': title, 'Content-Type': 'text/plain; charset=utf-8' },
+    body,
+  });
+  if (!res.ok) throw new Error('ntfy ' + res.status);
+}
+
+async function sendPushover(userKey, token, title, body) {
+  if (!token) throw new Error('missing pushoverToken setting');
+  const form = new URLSearchParams({ token, user: userKey, title, message: body });
+  const res = await fetch('https://api.pushover.net/1/messages.json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString(),
+  });
+  if (!res.ok) throw new Error('pushover ' + res.status);
+}
+
+async function sendWebhook(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error('webhook ' + res.status);
+}
+
+async function pushToPhone(title, body, sessionId, mode) {
+  const provider = (settings.provider || 'ntfy').toLowerCase();
+  const target = (settings.target || '').trim();
+  if (!target) { log('no target configured — skipping ' + provider + ' push'); return; }
+  try {
+    if (provider === 'pushover') {
+      await sendPushover(target, (settings.pushoverToken || '').trim(), title, body);
+    } else if (provider === 'webhook') {
+      await sendWebhook(target, { title, body, sessionId, mode });
+    } else {
+      await sendNtfy(target, title, body);
+    }
+    log('pushed via ' + provider + ': ' + title);
+  } catch (e) {
+    // Never let a transport failure crash the sidecar — just log it.
+    log('push failed (' + provider + '): ' + e.message);
+  }
+}
+
 async function onEvent(event) {
-  log('event ' + event.type);
-  // TODO: react to `event`. Use call('cap.method', {...}) for capabilities,
-  // publish('command.x', {...}) for commands, or fetch(...) to reach outside.
+  if (event.type !== 'agent.state_changed') return;
+  const data = event.data || {};
+  const mode = data.mode;
+  const sessionId = data.sessionId || '';
+  if (!MODE_PHRASE[mode]) {
+    // Not a needs-you moment; keep dedup state so we re-notify on the next entry.
+    if (sessionId) lastMode.set(sessionId, mode);
+    return;
+  }
+
+  // Dedup per (sessionId, mode): skip if we already pushed this exact state.
+  if (sessionId && lastMode.get(sessionId) === mode) return;
+  if (sessionId) lastMode.set(sessionId, mode);
+
+  const label = agentLabel(data);
+  const phrase = MODE_PHRASE[mode];
+  const title = label + ' ' + phrase;
+  const body = 'Agent "' + label + '" ' + phrase
+    + (data.cwd ? ' (' + data.cwd + ')' : '') + '.';
+
+  // Fire the phone push and the desktop mirror concurrently; both are guarded.
+  await Promise.allSettled([
+    pushToPhone(title, body, sessionId, mode),
+    (async () => {
+      try { await call('notifications.post', { title, body }); }
+      catch (e) { log('notifications.post failed: ' + e.message); }
+    })(),
+  ]);
 }
 
 const server = http.createServer((req, res) => {

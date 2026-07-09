@@ -34,10 +34,17 @@
     },
     {
       "key": "target",
-      "label": "Topic / token / URL",
+      "label": "Topic / user key / URL",
       "type": "string",
       "default": "",
       "help": "ntfy topic, Pushover user key, or webhook URL."
+    },
+    {
+      "key": "pushoverToken",
+      "label": "Pushover app token",
+      "type": "string",
+      "default": "",
+      "help": "Pushover application API token (only needed when provider = pushover)."
     }
   ],
   "capabilities": [
