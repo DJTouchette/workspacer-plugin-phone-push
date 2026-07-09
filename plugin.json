@@ -1,0 +1,49 @@
+{
+  "id": "djtouchette.phone-push",
+  "name": "Phone Push",
+  "apiVersion": "1",
+  "server": {
+    "command": "node",
+    "args": [
+      "server.js"
+    ],
+    "port": 9209,
+    "health": "/health"
+  },
+  "panes": [
+    {
+      "type": "djtouchette.phone-push",
+      "title": "Phone Push",
+      "icon": "\ud83d\udcf1",
+      "scope": "global",
+      "path": "/"
+    }
+  ],
+  "settings": [
+    {
+      "key": "provider",
+      "label": "Provider",
+      "type": "select",
+      "default": "ntfy",
+      "options": [
+        "ntfy",
+        "pushover",
+        "webhook"
+      ],
+      "help": "Push provider."
+    },
+    {
+      "key": "target",
+      "label": "Topic / token / URL",
+      "type": "string",
+      "default": "",
+      "help": "ntfy topic, Pushover user key, or webhook URL."
+    }
+  ],
+  "capabilities": [
+    "notifications.post"
+  ],
+  "consumes": [
+    "agent.state_changed"
+  ]
+}
