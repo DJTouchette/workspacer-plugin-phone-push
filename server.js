@@ -36,8 +36,11 @@ wks.onStatus((c) => { if (c) log('connected; subscribed to ' + (TOPICS.join(', '
 // ── Your plugin logic ─────────────────────────────────────────────────────────
 // Push "needs-you" moments to your phone. On agent.state_changed with a mode in
 // {approval, question, stopped} we compose a short title/body and send it via the
-// configured provider (ntfy / pushover / webhook), while also mirroring to the
-// desktop `notifications.post` capability. Dedup keeps a flapping state quiet.
+// configured provider (ntfy / pushover / webhook). Dedup keeps a flapping state
+// quiet. Successful pushes raise NO desktop notification (the app already
+// surfaces needs-you moments natively) — but a FAILED push does: the user
+// thinks they're covered on their phone precisely when they're away, so a
+// silent delivery failure is the worst case. See notifyPushFailure().
 
 // mode → human phrase for the notification body.
 const MODE_PHRASE = {
@@ -97,6 +100,25 @@ async function sendWebhook(url, payload) {
   if (!res.ok) throw new Error('webhook ' + res.status);
 }
 
+// A push we owed the user did not reach their phone — say so in the app, loud
+// (level:'error', OS-escalating). One key means repeated failures replace the
+// previous entry instead of stacking; sessionId points the click at the agent
+// whose needs-you moment was dropped. Guarded: a dead host side only logs.
+async function notifyPushFailure(provider, errMessage, title, sessionId) {
+  try {
+    await wks.call('notifications.post', {
+      title: 'Phone push failed',
+      body: provider + ' delivery failed (' + errMessage + ') — "' + title + '" never reached your phone.',
+      level: 'error',
+      source: 'plugin:' + manifest.id,
+      key: 'phone-push:error',
+      sessionId: sessionId || undefined,
+    });
+  } catch (e) {
+    log('notifications.post failed: ' + e.message);
+  }
+}
+
 async function pushToPhone(title, body, sessionId, mode) {
   const provider = (settings.provider || 'ntfy').toLowerCase();
   const target = (settings.target || '').trim();
@@ -111,8 +133,11 @@ async function pushToPhone(title, body, sessionId, mode) {
     }
     log('pushed via ' + provider + ': ' + title);
   } catch (e) {
-    // Never let a transport failure crash the sidecar — just log it.
+    // Never let a transport failure crash the sidecar — log it AND surface it
+    // in the desktop notification center (e.message carries the provider's
+    // HTTP status, e.g. "ntfy 502").
     log('push failed (' + provider + '): ' + e.message);
+    await notifyPushFailure(provider, e.message, title, sessionId);
   }
 }
 
@@ -137,14 +162,9 @@ async function onEvent(event) {
   const body = 'Agent "' + label + '" ' + phrase
     + (data.cwd ? ' (' + data.cwd + ')' : '') + '.';
 
-  // Fire the phone push and the desktop mirror concurrently; both are guarded.
-  await Promise.allSettled([
-    pushToPhone(title, body, sessionId, mode),
-    (async () => {
-      try { await wks.call('notifications.post', { title, body }); }
-      catch (e) { log('notifications.post failed: ' + e.message); }
-    })(),
-  ]);
+  // Phone push only — no desktop mirror for routine needs-you moments (the app
+  // already surfaces those natively; mirroring them just doubled the noise).
+  await pushToPhone(title, body, sessionId, mode);
 }
 
 const server = http.createServer((req, res) => {
